@@ -1,2 +1,0 @@
-# windowTint
-tint me windows
