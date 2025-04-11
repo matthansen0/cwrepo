@@ -1,77 +1,95 @@
+param (
+    [int[]]$tcpin,
+    [int[]]$tcpout,
+    [int[]]$udpin,
+    [int[]]$udpout
+)
 
-    #Backup Firewall
-    mkdir C:\firewall
-    netsh advfirewall export C:\firewall\ORIGINAL_FW.wfw
-    Write-Host "[OK] " -ForegroundColor Green -NoNewLine 
-    Write-Host "Firewall backed up" -ForegroundColor Green 
 
-    if ($global:config.IsDomainController -eq 1) {
-        $tcpports = "53,88,389,25,587,123"
-        $udpports = "53,88,389,25,587,123"
+## Create directory for backup
+$firewallDir = "C:\firewall"
+New-Item -ItemType Directory -Path $firewallDir
+
+## Export current rules
+$firewallBackup = "$firewallDir\original_fw.wfw"
+netsh advfirewall export $firewallBackup
+
+## Set default allow action for all profiles
+Set-NetFirewallProfile -Profile Domain, Private, Public -DefaultInboundAction Allow -DefaultOutboundAction Allow
+
+## Disable all profiles
+Set-NetFirewallProfile -Profile Domain, Private, Public -Enabled False
+
+## Disable all current rules
+Get-NetFirewallRule | Disable-NetFirewallRule
+
+## Delete all current rules
+Get-NetFirewallRule | Remove-NetFirewallRule
+
+
+#saveSinnoh 
+New-NetFirewallRule -DisplayName "tcp_22_in" -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow
+New-NetFirewallRule -DisplayName "tcp_22_out" -Direction Outbound -Protocol TCP -RemotePort 22 -Action Allow
+New-NetFirewallRule -DisplayName "tcp_3389_out" -Direction Outbound -Protocol TCP -RemotePort 3389 -Action Allow
+New-NetFirewallRule -DisplayName "tcp_3389_in" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow
+New-NetFirewallRule -DisplayName "udp_3389_in" -Direction Inbound -Protocol UDP -LocalPort 3389 -Action Allow
+New-NetFirewallRule -DisplayName "tcp_5985_in" -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow
+New-NetFirewallRule -DisplayName "tcp_5985_out" -Direction Outbound -Protocol TCP -RemotePort 5985 -Action Allow
+New-NetFirewallRule -DisplayName "CCS-Out" -Direction Outbound -Protocol TCP -RemotePort 80,443 -Program "%systemdrive%\CCS\CCSClient.exe" -Action Allow
+
+
+function add-fwRule {
+    param (
+        [string]$Direction,
+        [string]$Protocol,
+        [int[]]$Ports
+    )
+
+    foreach ($port in $Ports) {
+        $ruleName = "~${Protocol}_${Direction}_${port}"
+        Write-Host "`nCreating rule: $ruleName" -ForegroundColor Cyan
+
+        try {
+            $params = @{
+                DisplayName         = $ruleName
+                Direction           = $Direction
+                Action              = 'Allow'
+                Protocol            = $Protocol
+                Profile             = 'Any'
+                EdgeTraversalPolicy = 'Block'
+                Enabled             = 'True'
+                Verbose             = $true
+            }
+
+            if ($Direction -eq 'Inbound') {
+                $params['LocalPort'] = $port
+            } elseif ($Direction -eq 'Outbound') {
+                $params['RemotePort'] = $port
+            }
+
+            New-NetFirewallRule @params
+        }
+        catch {
+            Write-Error "Failed to create rule '$ruleName': $_"
+        }
     }
-    else{
-        # THIS ALLOWS ALL WEB, FTP, AND RDP TRAFFIC
-        $tcpports = "80,443,21,3389,123"
-        $udpports = "80,443,21,3389,123"
-    }
+}
+
+## params
+if ($tcpin)   { add-fwRule -Direction 'Inbound'  -Protocol 'TCP' -Ports $tcpin }
+if ($tcpout)  { add-fwRule -Direction 'Outbound' -Protocol 'TCP' -Ports $tcpout }
+if ($udpin)   { add-fwRule -Direction 'Inbound'  -Protocol 'UDP' -Ports $udpin }
+if ($udpout)  { add-fwRule -Direction 'Outbound' -Protocol 'UDP' -Ports $udpout }
 
 
+## Notify when a service starts listening for inbound connections
+Set-NetFirewallProfile -NotifyOnListen True
 
-    #Enables and Sets Firewall Logging to File
-    #This could be broken out into 3 seperate logs for allowed, blocked, and ignored if desired.
-    Set-NetFirewallProfile -LogFileName C:\firewall\firewall.log -LogAllowed True -LogBlocked True -LogIgnored True -LogMaxSizeKilobytes 32767
+## Define settings for log
+Set-NetFirewallProfile -LogAllowed True -LogBlocked True -LogIgnored True -LogMaxSizeKilobytes 32767
 
-    #Sets Firewall to block all profiles and disables Firewall while rules are being made
-    Set-NetFirewallProfile -Profile Domain, Public, Private -DefaultInboundAction block -DefaultOutboundAction block -Enabled false
+## Set default block action for all profiles
+Set-NetFirewallProfile -Profile Domain, Private, Public -DefaultInboundAction Block -DefaultOutboundAction Block
 
-    #Disables all firewall rules
-    Disable-NetFirewallRule -All
-
-    #Set Allowed Rules
-    New-NetFirewallRule -DisplayName "Allow Update" -Direction Outbound -Program "C:\tools\malwarebytes.exe" -Action Allow
-    New-NetFirewallRule -DisplayName "Allow Ping" -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Allow
-    New-NetFirewallRule -DisplayName "Allow Ping" -Direction Outbound -Protocol ICMPv4 -Action Allow
-    New-NetFirewallRule -DisplayName "Allow Update" -Direction Outbound -Program "C:\Windows\system32\wusa.exe" -Action Allow
-    New-NetFirewallRule -DisplayName "Allow SNMP" -Direction Inbound -Protocol UDP -LocalPort 161 -Action Allow
-    New-NetFirewallRule -DisplayName "Allow SNMP" -Direction Outbound -Protocol UDP -RemotePort 161 -Action Allow
-
-    # Allow Zabbix Agent and comms from the server, needs to be changed to binary level firewall
-    New-NetFirewallRule -DisplayName "Zabbix" -Direction Inbound -Protocol UDP -LocalPort 10050 -Action Allow
-    New-NetFirewallRule -DisplayName "Zabbix" -Direction Outbound -Protocol UDP -RemotePort 10051 -Action Allow
-
-    # Allow Splunk forwarder, needs to be changed to binary level firewall
-    New-NetFirewallRule -DisplayName "Splunk Forwarder" -Direction Inbound -Protocol UDP -LocalPort 9997 -Action Allow
-    New-NetFirewallRule -DisplayName "Splunk Forwarder" -Direction Outbound -Protocol UDP -RemotePort 9997 -Action Allow
-
-
-    Enable-NetFirewallRule -DisplayName "Core Networking - DNS (UDP-Out)"
-    Enable-NetFirewallRule -DisplayName "Core Networking - Group Policy (LSASS-Out)"
-    Enable-NetFirewallRule -DisplayName "Core Networking - Group Policy (NP-Out)"
-    Enable-NetFirewallRule -DisplayName "Core networking - Group Policy (TCP-Out)"
-    if ($global:config.IsDomainController -eq 1) {
-        Enable-NetFirewallRule -DisplayGroup "Active Directory Domain Services" -Direction Inbound
-        Enable-NetFirewallRule -DisplayGroup "DNS Service" -Direction Inbound
-        Enable-NetFirewallRule -DisplayGroup "DFS Management" -Direction Inbound
-        Enable-NetFirewallRule -DisplayGroup "DFS Replication" -Direction Inbound
-        Enable-NetFirewallRule -DisplayGroup "Kerberos Key Distribution Center" -Direction Inbound
-        Enable-NetFirewallRule -DisplayName "Active Directory Domain Controller (TCP-Out)"
-        Enable-NetFirewallRule -DisplayName "Active Directory Domain Controller (UDP-Out)"
-    }
-    if ($tcpports) {
-        New-NetFirewallRule -DisplayName "Allow TCP Ports" -Direction Inbound -Protocol TCP -LocalPort $tcpports.split(',') -Action Allow
-        New-NetFirewallRule -DisplayName "Allow TCP Ports" -Direction Outbound -Protocol TCP -RemotePort $tcpports.split(',') -Action Allow
-    }
-    if ($udpports) {
-        New-NetFirewallRule -DisplayName "Allow UDP Ports" -Direction Inbound -Protocol UDP -LocalPort $udpports.split(',') -Action Allow
-        New-NetFirewallRule -DisplayName "Allow UDP Ports" -Direction Outbound -Protocol UDP -RemotePort $udpports.split(',') -Action Allow
-    }
-
-    #Turn on Firewall
-    Set-NetFirewallProfile -Enabled True
-
-    #Notify when a service starts listening for inbound connections
-    Set-NetFirewallProfile -NotifyOnListen True
-
-    Write-Host "[OK] " -ForegroundColor Green -NoNewLine 
-
-
+## Enable all profiles
+Set-NetFirewallProfile -Profile Domain, Private, Public -Enabled True
